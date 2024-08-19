@@ -20,6 +20,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
+#include <unordered_map>
+#include <unordered_set>
 #if !defined(WIN32) && !defined(_WIN32)
 #include <unistd.h>
 #endif
@@ -29,7 +31,10 @@
 #include "internal_types.h"
 #include "functional_util.h"
 
+#include <string>
+
 void basic_test()
+
 {
     TEST_INIT();
 
@@ -5420,7 +5425,109 @@ void bottom_up_build_test()
     TEST_RESULT("bottom-up build test");
 }
 
+void seq_check()
+{
+    TEST_INIT();
+    int r;
+    fdb_status s; (void)s;
+
+    memleak_start();
+
+    // remove previous dummy files
+    r = system(SHELL_DEL" dummy* > errorlog.txt");
+    (void)r;
+
+    fdb_config config = fdb_get_default_config();
+    config.do_not_search_wal = true;
+
+    fdb_kvs_config kvs_config = fdb_get_default_kvs_config();
+
+    // create a file
+    fdb_file_handle *dbfile;
+    s = fdb_open(&dbfile, "table0000_00000121", &config);
+    TEST_CHK(s == FDB_RESULT_SUCCESS);
+
+    fdb_kvs_handle *default_db;
+    s = fdb_kvs_open(dbfile, &default_db, NULL, &kvs_config);
+    TEST_CHK(s == FDB_RESULT_SUCCESS);
+
+    fdb_iterator *fit;
+
+    s = fdb_iterator_init(default_db, &fit, NULL, 0, NULL, 0, FDB_ITR_NO_DELETES);
+    TEST_CHK(s == FDB_RESULT_SUCCESS);
+
+    struct DocCtx {
+        std::string key;
+        size_t offset;
+    };
+
+    std::unordered_map<uint64_t, DocCtx> seqs;
+    fdb_doc *rdoc = NULL;
+
+    size_t count = 0;
+    size_t num_dup = 0;
+    do {
+        s = fdb_iterator_get(fit, &rdoc);
+        TEST_CHK(s == FDB_RESULT_SUCCESS);
+
+        auto entry = seqs.find(rdoc->seqnum);
+        if (entry != seqs.end()) {
+            fprintf(stderr, "Duplicate seqnum %" _F64 ", count %zu\n", rdoc->seqnum, ++num_dup);
+
+            fprintf(stderr, "try to insert (size %zu, offset %zu):\n",
+                    rdoc->keylen, rdoc->offset);
+            for (size_t ii = 0; ii < rdoc->keylen; ++ii) {
+                fprintf(stderr, "%02x ", ((uint8_t*)rdoc->key)[ii]);
+            }
+            fprintf(stderr, "\n");
+
+            fprintf(stderr, "existing (size %zu, offset %zu):\n",
+                    entry->second.key.size(), entry->second.offset);
+            for (size_t ii = 0; ii < entry->second.key.size(); ++ii) {
+                fprintf(stderr, "%02x ", (uint8_t)entry->second.key[ii]);
+            }
+            fprintf(stderr, "\n");
+
+            //TEST_CHK(0);
+        } else {
+            DocCtx ctx;
+            ctx.key = std::string((const char*)rdoc->key, rdoc->keylen);
+            ctx.offset = rdoc->offset;
+            seqs.insert({rdoc->seqnum, std::move(ctx)} );
+        }
+
+        count++;
+        if (count % 500000 == 0) {
+            fprintf(stderr, "Processed %zu, sample key size %zu, ", count, rdoc->keylen);
+            for (size_t ii = 0; ii < rdoc->keylen; ++ii) {
+                fprintf(stderr, "%02x ", ((uint8_t*)rdoc->key)[ii]);
+            }
+            fprintf(stderr, "\n");
+        }
+
+        fdb_doc_free(rdoc);
+        rdoc = NULL;
+
+    } while(fdb_iterator_next(fit) != FDB_RESULT_ITERATOR_FAIL);
+
+    s = fdb_iterator_close(fit);
+    TEST_CHK(s == FDB_RESULT_SUCCESS);
+
+    s = fdb_kvs_close(default_db);
+    TEST_CHK(s == FDB_RESULT_SUCCESS);
+
+    s = fdb_close(dbfile);
+    TEST_CHK(s == FDB_RESULT_SUCCESS);
+
+    s = fdb_shutdown();
+    memleak_end();
+
+    TEST_RESULT("bottom-up build test");
+}
+
 int main(){
+    seq_check();
+#if 0
     basic_test();
     init_test();
     set_get_max_keylen();
@@ -5480,5 +5587,6 @@ int main(){
     get_nearest_test();
     get_nearest_with_deletion_test();
     bottom_up_build_test();
+#endif
     return 0;
 }
